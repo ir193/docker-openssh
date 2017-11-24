@@ -1,0 +1,58 @@
+#!/bin/bash
+
+if [ -n "$SINGLE_NODE" ] ; then
+  RANK0=1
+  touch /tmp/mpihosts
+  SSHD_PORT=6666
+  WAIT_SSHD_SECS=0
+fi
+
+if [ -z "$RANK0" ] ; then
+  # if we are not RANK0, we just launch sshd
+  /root/.ssh/entrypoint.sh
+  exit 0
+fi
+
+if [ ! -f /tmp/mpihosts ]; then
+  echo "Expecting /tmp/mpihosts file"
+  exit 1
+fi
+
+# send sshd to background
+/root/.ssh/entrypoint.sh &> /dev/null &
+
+# wait for other's sshd to start
+if [ -z "$WAIT_SSHD_SECS" ] ; then
+  WAIT_SSHD_SECS=60
+fi
+sleep $WAIT_SSHD_SECS
+
+# run
+if [ -z "$MPIRUN_FLAGS" ] ; then
+  MPIRUN_FLAGS=""
+fi
+if [ -z "$SINGLE_NODE" ] ; then
+  MPIRUN_FLAGS="$MPIRUN_FLAGS --hostfile /tmp/mpihosts"
+fi
+echo "running mpirun  $MPIRUN_FLAGS $@"
+mpirun \
+  $MPIRUN_FLAGS \
+  $@ 2> mpirun.err > mpirun.out
+mpiresult=$?
+
+# copy output from all ranks to /results folder
+for host in `cat /tmp/mpihosts`; do
+  ssh -p $SSHD_PORT $host copyresults
+done
+
+# stop sshd. This should stop the openmpi containers running on all containers 
+# but ours since sshd is the main process for those. In our case, this was sent 
+# to the background earlier (above), so stopping sshd won't stop the container
+stopsshd "`cat /tmp/mpihosts`"
+
+# execute user-defined post-processing if exists
+hash mpipostrun &> /dev/null && mpipostrun
+
+copyresults
+
+exit $mpiresult
